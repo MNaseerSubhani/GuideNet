@@ -2,3 +2,4 @@ checkpoints/
 data/
 eval_outputs/
 *.pyc
+*.~*
