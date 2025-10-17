@@ -3,4 +3,4 @@ data/
 eval_outputs/
 *.pyc
 *.~*
-*run_*
+*run_*/
