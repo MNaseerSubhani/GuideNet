@@ -116,7 +116,7 @@ def train(model, writer):
         torch.backends.cudnn.benchmark = True
 
     dataset = MapDataset(
-        xml_dir="/Users/brikelkeputa/Downloads/singapore_split/cleaneddata/test",
+        xml_dir="./data",
         obs_len=10, pred_len=20, max_radius=100,
         num_timesteps=30, num_polylines=500, num_points=10,
         save_plots=False, max_agents=32

@@ -248,3 +248,21 @@ def embed_features(
     embedded_features = torch.cat(all_features, dim=-1) # [B, A, T, D_total]
     
     return embedded_features
+
+
+def sample_noise(feature_tensor: torch.Tensor,
+                 obs_len: int = 10,
+                 sigma_min: float = 0.002,
+                 sigma_max: float = 20.0,
+                 rho: float = 7.0):
+    """
+    Returns per-batch sigma and a noised tensor, adding noise only to the future timesteps.
+    """
+    B = feature_tensor.size(0)
+    device = feature_tensor.device
+    u = torch.rand(B, device=device)
+    sigma = (sigma_max**(1.0 / rho) + u * (sigma_min**(1.0 / rho) - sigma_max**(1.0 / rho))) ** rho  # [B]
+    noise = torch.randn_like(feature_tensor)
+    noised = feature_tensor.clone()
+    noised[:, :, obs_len:, :] = feature_tensor[:, :, obs_len:, :] + sigma[:, None, None, None] * noise[:, :, obs_len:, :]
+    return sigma, noised
