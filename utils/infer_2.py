@@ -6,9 +6,9 @@ import numpy as np
 from torch.utils.data import DataLoader
 from torch import amp
 
-from map_pre_old import MapDataset
-from networks_2 import Denoiser          # model is passed in, fallback only if None
-from utils import plot_trajectories, embed_features
+from dataset.map_pre_old import MapDataset
+from models.networks_2 import Denoiser          # model is passed in, fallback only if None
+from utils.utils import plot_trajectories, embed_features
 
 # -------------------- constants --------------------
 EMBED_DX = 1280  # must match networks_2.FeatureMLP(input_dim)
@@ -378,11 +378,11 @@ def calculate_validation_loss_and_plot(
                     )
                                         
                     # Versuch zu speichern (wie in Ihrem Code)
-                    try:
-                        out_png = os.path.join(os.getcwd(), "MA.png")
-                        fig_to_return.savefig(out_png, dpi=150, bbox_inches="tight"); print(f" Visualization saved: {out_png}")
-                    except Exception as e:
-                        warnings.warn(f"Failed to save plot: {e}")
+                    # try:
+                    #     out_png = os.path.join(os.getcwd(), "MA.png")
+                    #     fig_to_return.savefig(out_png, dpi=150, bbox_inches="tight"); print(f" Visualization saved: {out_png}")
+                    # except Exception as e:
+                    #     warnings.warn(f"Failed to save plot: {e}")
                 # --- ENDE PLOT-BLOCK ---
 
                 if (batch_idx + 1) % 20 == 0:

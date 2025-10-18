@@ -5,16 +5,18 @@ import warnings
 import argparse
 import numpy as np
 
+import re
+
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch import amp
 
-from map_pre_old import MapDataset
-from networks_2 import Denoiser
-from utils import plot_trajectories, sample_noise, embed_features
-from infer_2 import calculate_validation_loss_and_plot
+from dataset.map_pre_old import MapDataset
+from models.networks_2 import Denoiser
+from utils.utils import plot_trajectories, sample_noise, embed_features
+from utils.infer_2 import calculate_validation_loss_and_plot
 
 
 def _bool(s):
@@ -50,8 +52,32 @@ def train_loop(args):
     if device.type == 'cuda':
         torch.backends.cudnn.benchmark = True
 
-    os.makedirs(args.log_dir, exist_ok=True)
-    writer = SummaryWriter(log_dir=args.log_dir)
+    # Extract run number from log_dir (e.g., "runs_5" -> "5")
+
+    eval_base_dir = os.path.join("results", args.model_type)
+    os.makedirs(eval_base_dir, exist_ok=True)
+
+    # Pattern to match run_*
+    run_pattern = re.compile(r"run_(\d+)")
+    run_numbers = []
+
+    # Collect all run numbers
+    for name in os.listdir(eval_base_dir):
+        match = run_pattern.match(name)
+        if match:
+            run_numbers.append(int(match.group(1)))
+
+    # Determine next run number
+    next_run_num = max(run_numbers) + 1 if run_numbers else 0
+    # Create new run folder
+    new_run_folder = os.path.join(eval_base_dir, f"runs_{next_run_num}")
+    os.makedirs(new_run_folder)
+
+
+
+    
+   
+    writer = SummaryWriter(log_dir=new_run_folder)
 
     dataset, dataloader = create_dataloaders(
         xml_dir=args.train_xml,
@@ -161,8 +187,9 @@ def train_loop(args):
         print(f"Epoch {epoch+1}/{args.epochs} - loss={avg_epoch_loss:.4f} - {time.time()-t0:.1f}s")
 
         if (epoch % args.val_every) == 0:
-            ckpt_path = os.path.join(args.ckpt_dir, f"model_epoch_{epoch}.pt")
-            os.makedirs(args.ckpt_dir, exist_ok=True)
+            ckpt_dir = os.path.join("checkpoints", f"{args.model_type}", f"runs_{next_run_num}")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            ckpt_path = os.path.join(ckpt_dir, f"model_epoch_{epoch}.pt")
             torch.save(model.state_dict(), ckpt_path)
 
             avg_val_loss, val_fig = calculate_validation_loss_and_plot(
@@ -182,12 +209,14 @@ def train_loop(args):
             if not np.isnan(avg_val_loss):
                 val_losses.append(avg_val_loss)
                 writer.add_scalar("val/loss", avg_val_loss, epoch)
-            if (epoch % (args.val_plot_every)) == 0:
+
+            if (epoch % (args.val_every)) == 0:
                 if val_fig is not None:
-                    ts_dir = os.path.join(args.log_dir, "val_plots")
-                    os.makedirs(ts_dir, exist_ok=True)
+          
+                    results_dir = os.path.join(new_run_folder, "eval")
+                    os.makedirs(results_dir, exist_ok=True)
                     try:
-                        val_fig.savefig(os.path.join(ts_dir, f"val_epoch_{epoch:03d}.png"), dpi=150, bbox_inches="tight")
+                        val_fig.savefig(os.path.join(results_dir, f"val_epoch_{epoch:03d}.png"), dpi=150, bbox_inches="tight")
                     except Exception:
                         warnings.warn("Could not save validation figure.")
 
@@ -197,11 +226,9 @@ def train_loop(args):
 
 def build_argparser():
     p = argparse.ArgumentParser(description="Train diffusion model: 10 obs -> 20 pred")
-    p.add_argument('--train_xml', type=str, default='./data', help='Training XML directory')
-    p.add_argument('--val_xml', type=str, default='./data', help='Validation XML directory')
-    p.add_argument('--log_dir', type=str, default='./runs_5/REAL', help='TensorBoard log dir')
-    p.add_argument('--ckpt_dir', type=str, default='./checkpoints', help='Checkpoint directory')
-
+    p.add_argument('--train_xml', type=str, default='./data/train', help='Training XML directory')
+    p.add_argument('--val_xml', type=str, default='./data/val', help='Validation XML directory')
+   
     p.add_argument('--epochs', type=int, default=200)
     p.add_argument('--batch_size', type=int, default=32)
     p.add_argument('--num_workers', type=int, default=4)
@@ -219,9 +246,12 @@ def build_argparser():
     p.add_argument('--sigma_data', type=float, default=0.5)
 
     p.add_argument('--val_every', type=int, default=20)
-    p.add_argument('--val_plot_every', type=int, default=100)
+
+    p.add_argument('--model_type', type=str, default='diffusion', help='Model type for directory structure')
     # Evaluation options
     p.add_argument('--eval_only', action='store_true', help='Run evaluation only (no training)')
+
+
     p.add_argument('--ckpt_path', type=str, default='', help='Path to model checkpoint for eval')
     p.add_argument('--eval_save_dir', type=str, default='./eval_outputs', help='Where to save eval plots')
     return p

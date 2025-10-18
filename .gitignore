@@ -4,3 +4,4 @@ eval_outputs/
 *.pyc
 *.~*
 runs_*/
+results/

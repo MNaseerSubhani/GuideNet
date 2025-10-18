@@ -84,10 +84,11 @@ def train_loop(args):
     model = Denoiser().to(device)
     model.train()
 
-    optimizer = optim.Adam(model.parameters(), lr=0.0)
-
     # conditioning projector (additive over future embedding)
     cond_proj = CondProjAdditive(EMBED_DX).to(device)
+
+    optimizer = optim.Adam(model.parameters(), lr=0.0)
+    optimizer.add_param_group({"params": cond_proj.parameters(), "lr": 0.0})  # same LR schedule
 
     steps_per_epoch = max(1, len(dataloader))
     ramp_up_steps = max(1, int(args.lr_warmup_frac * steps_per_epoch))
@@ -193,7 +194,12 @@ def train_loop(args):
         if (epoch % args.val_every) == 0:
             ckpt_path = os.path.join(args.ckpt_dir, f"model_epoch_{epoch}.pt")
             os.makedirs(args.ckpt_dir, exist_ok=True)
-            torch.save(model.state_dict(), ckpt_path)
+            ckpt = {
+                "model": model.state_dict(),
+                "cond_proj": cond_proj.state_dict(),
+                "epoch": epoch,
+            }
+            torch.save(ckpt, ckpt_path)
 
             avg_val_loss, val_fig = calculate_validation_loss_and_plot(
                 model=model,
@@ -210,6 +216,7 @@ def train_loop(args):
                 direction_command=True,
                 cond_scale=args.cond_scale,
                 turn_thresh_deg=args.turn_thresh_deg,
+                cond_proj_state_dict=cond_proj.state_dict(),
             )
             print(f"Val @ epoch {epoch}: {avg_val_loss:.4f}")
             if not np.isnan(avg_val_loss):
@@ -270,10 +277,22 @@ if __name__ == '__main__':
     if args.eval_only:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = Denoiser().to(device)
+        cond_proj = CondProjAdditive(EMBED_DX).to(device)
+        
         if args.ckpt_path and os.path.isfile(args.ckpt_path):
             print(f"Loading checkpoint: {args.ckpt_path}")
             state = torch.load(args.ckpt_path, map_location=device)
-            model.load_state_dict(state)
+            if isinstance(state, dict) and "model" in state:
+                model.load_state_dict(state["model"])
+                if "cond_proj" in state:
+                    cond_proj.load_state_dict(state["cond_proj"])
+                    print("Loaded cond_proj from checkpoint")
+                else:
+                    print("Warning: cond_proj not found in checkpoint")
+            else:
+                # Legacy checkpoint format (only model state dict)
+                model.load_state_dict(state)
+                print("Warning: Legacy checkpoint format - cond_proj not loaded")
         else:
             if args.ckpt_path:
                 print(f"Warning: checkpoint not found at {args.ckpt_path}. Evaluating with randomly initialized model.")
@@ -294,6 +313,7 @@ if __name__ == '__main__':
             direction_command=True,
             cond_scale=args.cond_scale,
             turn_thresh_deg=args.turn_thresh_deg,
+            cond_proj_state_dict=cond_proj.state_dict(),
         )
         print(f"Eval avg loss: {avg_val_loss:.6f}")
         if val_fig is not None:
