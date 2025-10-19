@@ -12,17 +12,22 @@ GuideNet/
 ├── dataset/                # Data loading and preprocessing
 │   └── map_pre_old.py      # MapDataset implementation
 ├── models/                 # Neural network architectures
-│   └── networks_2.py       # Denoiser model implementation
+│   ├── network_diffusion.py        # Unconditional diffusion model
+│   └── networks_cond_diffusion.py  # Conditional diffusion model
 ├── scripts/                # Training and evaluation scripts
 │   ├── diffusion.py        # Unconditional diffusion training
 │   ├── diffusion_cond.py   # Conditional diffusion training
-│   └── real_train.py      # Additional training utilities
+│   └── infer_diffusions.py # Inference and evaluation utilities
 ├── utils/                  # Utility functions
-│   ├── utils.py           # General utilities
-│   └── infer_2.py         # Inference and evaluation utilities
+│   └── utils.py           # General utilities
 ├── checkpoints/            # Model checkpoints
+│   ├── diffusion/         # Unconditional model checkpoints
+│   └── diffusion_cond/    # Conditional model checkpoints
 ├── results/               # Training logs and outputs
-└── run_diffusion.sh       # Convenience script for running experiments
+│   ├── diffusion/         # Unconditional model results
+│   └── diffusion_cond/    # Conditional model results
+├── run_diffusion.sh       # Unconditional diffusion runner
+└── run_diffusion_cond.sh  # Conditional diffusion runner
 ```
 
 ## Installation
@@ -43,14 +48,9 @@ cd GuideNet
 
 2. Install dependencies:
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-pip install numpy matplotlib tensorboard
+pip install -r requirements.txt
 ```
 
-3. Set up the Python path:
-```bash
-export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-```
 
 ## Data Setup
 
@@ -83,15 +83,20 @@ The XML files should contain trajectory data with the following structure:
 Use the convenience script for quick training and evaluation:
 
 ```bash
-# Make the script executable
-chmod +x run_diffusion.sh
-
 # Train unconditional diffusion model
-./run_diffusion.sh train
+bash run_diffusion.sh train
 
 # Evaluate trained model
-./run_diffusion.sh eval
+bash run_diffusion.sh eval
+
+# Train conditional diffusion model with [Right, left, Straight] conditions
+bash run_diffusion_cond.sh train
+
+# Evaluate trained model
+bash run_diffusion_cond.sh eval
 ```
+
+
 
 ### Training Process
 
@@ -197,78 +202,12 @@ python scripts/diffusion_cond.py \
     --turn_thresh_deg 15.0
 ```
 
-### Monitoring Training
 
-Use TensorBoard to monitor training progress:
-
-```bash
-tensorboard --logdir results/diffusion/
-```
-
-## Model Architecture
-
-### Unconditional Diffusion Model
-- **Denoiser**: Transformer-based architecture with agent self-attention
-- **Input**: Observed trajectories + roadgraph context
-- **Output**: Predicted future trajectories
-- **Loss**: Weighted MSE with sigma-dependent weighting
-
-### Conditional Diffusion Model
-- **Base Model**: Same denoiser as unconditional model
-- **Conditioning**: Additive conditioning with maneuver classification (L/R/S)
-- **Conditioning Projector**: MLP that maps direction one-hot to embedding
-- **Training**: Teacher forcing with ground truth maneuvers
-- **Inference**: Classifier-free guidance for controllable generation
-
-## Key Features
-
-1. **Diffusion-based Generation**: Uses EDM (Elucidated Diffusion Models) framework
-2. **Multi-agent Support**: Handles multiple agents per scene
-3. **Roadgraph Integration**: Incorporates map context for better predictions
-4. **Maneuver Conditioning**: Conditional generation for Left/Right/Straight maneuvers
-5. **Ego-centric Processing**: Transforms trajectories to ego vehicle perspective
-6. **Automatic Mixed Precision**: Uses AMP for faster training on GPU
 
 ## Output Files
 
 ### Training Outputs
 - **Checkpoints**: Saved in `checkpoints/{model_type}/runs_{N}/`
-- **Logs**: TensorBoard logs in `results/{model_type}/run_{N}/`
+- **Logs**: TensorBoard logs in `results/{model_type}/run_{N}/train/`
 - **Validation Plots**: Saved in `results/{model_type}/run_{N}/eval/`
 
-### Evaluation Outputs
-- **Plots**: Trajectory visualizations saved to specified `--eval_save_dir`
-- **Metrics**: Validation loss printed to console
-
-## Troubleshooting
-
-### Common Issues
-
-1. **CUDA Out of Memory**: Reduce `--batch_size` or `--max_agents`
-2. **Data Loading Errors**: Ensure XML files are in correct format and paths are correct
-3. **Import Errors**: Make sure `PYTHONPATH` includes the project root
-4. **Checkpoint Loading**: Verify checkpoint paths and file existence
-
-### Performance Tips
-
-1. **GPU Memory**: Use smaller batch sizes for limited GPU memory
-2. **Data Loading**: Increase `--num_workers` for faster data loading (if CPU allows)
-3. **Mixed Precision**: Training automatically uses AMP when CUDA is available
-4. **Validation Frequency**: Adjust `--val_every` based on training time
-
-## Citation
-
-If you use this code, please cite the original paper:
-
-```bibtex
-@article{guidenet2024,
-  title={GuideNet: Diffusion-based Trajectory Prediction},
-  author={Your Name},
-  journal={Your Journal},
-  year={2024}
-}
-```
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
