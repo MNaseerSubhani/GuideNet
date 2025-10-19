@@ -7,7 +7,6 @@ from torch.utils.data import DataLoader
 from torch import amp
 
 from dataset.map_pre_old import MapDataset
-from models.networks_2 import Denoiser          # model is passed in, fallback only if None
 from utils.utils import plot_trajectories, embed_features
 
 # -------------------- constants --------------------
@@ -130,7 +129,7 @@ def calculate_validation_loss_and_plot(
     max_agents,
     sigma_data,
     device=torch.device('cpu'),
-    direction_command=True,  # NEU: Bedingung (z.B. "left")
+    direction_command=False,  # NEU: Bedingung (z.B. "left")
     cond_scale: float = 2.0,                 # NEU: CFG-Skalierung (z.B. 2.0)
     cond_proj_state_dict: Optional[Dict[str, Any]] = None, # NEU: Zum Laden des Cond-Projektors
     turn_thresh_deg: float = 15.0            # NEU: Für die Berechnung der Ground-Truth-Richtung
@@ -141,9 +140,7 @@ def calculate_validation_loss_and_plot(
 
     print(f"[VAL] Start (AUTO={direction_command}, CFG scale={cond_scale}) on: {val_xml_dir}")
 
-    model = Denoiser().to(device).eval()
-    
-  
+
     # NEU: Conditional Projection (CondProj) für die Konditionierung initialisieren/laden
  
     # condition projector only if AUTO
@@ -187,7 +184,7 @@ def calculate_validation_loss_and_plot(
     total_valid = 0.0
     fig_to_return = None
     t0 = time.time()
-
+    
 
 
     with torch.no_grad(), amp.autocast('cuda', enabled=(device.type == 'cuda')):
@@ -252,15 +249,20 @@ def calculate_validation_loss_and_plot(
                         seq = seq.clone()
                         seq[:, :, obs_len:, :] *= c_in_scalar
                         return embed_features(seq, c_noise_scalar, eval=True)  # (...,1280)
+
+                    def concat_embed(base_emb, cond_tensor):
+                        cond_full = torch.zeros((B, A, T, EMBED_DX), device=device, dtype=base_emb.dtype)
+                        cond_full[:, :, obs_len:, :] = cond_tensor
+                        return torch.cat([base_emb, cond_full], dim=-1)
                     # If direction_command is False, we do unconditional prediction only
                     if direction_command is True:
                         # conditional
                         base_emb_cond = _embed_precond(full_seq_base, c_in, c_noise)
-                        emb_cond = _add_condition_to_embed(base_emb_cond, current_c_cond_time, obs_len)
+                        emb_cond = concat_embed(base_emb_cond, current_c_cond_time)
                         model_out_cond = model(emb_cond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
                         # unconditional
                         base_emb_uncond = _embed_precond(full_seq_base, c_in, c_noise)
-                        emb_uncond = _add_condition_to_embed(base_emb_uncond, uncond_time_tensor, obs_len)
+                        emb_uncond = concat_embed(base_emb_uncond, uncond_time_tensor)
                         model_out_uncond = model(emb_uncond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
                         # CFG
                         model_out = model_out_uncond + cond_scale * (model_out_cond - model_out_uncond)
@@ -285,11 +287,11 @@ def calculate_validation_loss_and_plot(
 
                         if direction_command is True:
                             base_emb_t_cond = _embed_precond(full_seq_t, c_in_next, c_noise_next)
-                            emb_t_cond = _add_condition_to_embed(base_emb_t_cond, current_c_cond_time, obs_len)
+                            emb_t_cond = concat_embed(base_emb_t_cond, current_c_cond_time)
                             model_out_t_cond = model(emb_t_cond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
 
                             base_emb_t_uncond = _embed_precond(full_seq_t, c_in_next, c_noise_next)
-                            emb_t_uncond = _add_condition_to_embed(base_emb_t_uncond, uncond_time_tensor, obs_len)
+                            emb_t_uncond = concat_embed(base_emb_t_uncond, uncond_time_tensor)
                             model_out_t_uncond = model(emb_t_uncond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
 
                             model_out_t = model_out_t_uncond + cond_scale * (model_out_t_cond - model_out_t_uncond)
@@ -324,10 +326,10 @@ def calculate_validation_loss_and_plot(
                 
                 if direction_command is True:
                     cond_tensor_final = current_c_cond_time
-                    emb_final_cond = _add_condition_to_embed(base_emb_final, cond_tensor_final, obs_len)
+                    emb_final_cond = concat_embed(base_emb_final, cond_tensor_final)
                     out_final_cond = model(emb_final_cond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
 
-                    emb_final_uncond = _add_condition_to_embed(base_emb_final, uncond_time_tensor, obs_len)
+                    emb_final_uncond = concat_embed(base_emb_final, uncond_time_tensor)
                     out_final_uncond = model(emb_final_uncond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
 
                     model_out_final = out_final_uncond + cond_scale * (out_final_cond - out_final_uncond)
@@ -457,3 +459,6 @@ if __name__ == "__main__":
 
     except Exception as e:
         print(f"[SMOKE] Failed: {e}")
+
+
+

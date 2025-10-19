@@ -7,6 +7,10 @@ import numpy as np
 
 import re
 
+import os
+import glob
+import re
+
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -14,9 +18,9 @@ from torch.utils.tensorboard import SummaryWriter
 from torch import amp
 
 from dataset.map_pre_old import MapDataset
-from models.networks_2 import Denoiser
+from models.network_diffusion import Denoiser
 from utils.utils import plot_trajectories, sample_noise, embed_features
-from utils.infer_2 import calculate_validation_loss_and_plot
+from scripts.infer_diffusions import calculate_validation_loss_and_plot
 
 
 def _bool(s):
@@ -44,6 +48,79 @@ def create_dataloaders(xml_dir: str, batch_size: int, num_workers: int,
     )
     return dataset, dataloader
 
+import os
+import glob
+import re
+
+def find_latest_checkpoint(model_type="diffusion"):
+    """
+    Find the latest checkpoint from checkpoints/{model_type}/{latest_runs}/{latest_model}
+    Returns the path to the latest checkpoint file.
+    """
+    checkpoint_base = os.path.join("checkpoints", model_type)
+    
+    if not os.path.exists(checkpoint_base):
+        return None
+    
+    # Find all runs directories
+    runs_dirs = []
+    for item in os.listdir(checkpoint_base):
+        if os.path.isdir(os.path.join(checkpoint_base, item)) and item.startswith("runs_"):
+            runs_dirs.append(item)
+    
+    if not runs_dirs:
+        return None
+    
+    # Sort runs directories by number (runs_0, runs_1, etc.)
+    def extract_run_number(run_dir):
+        match = re.search(r'runs_(\d+)', run_dir)
+        return int(match.group(1)) if match else 0
+    
+    latest_run_dir = max(runs_dirs, key=extract_run_number)
+    latest_run_path = os.path.join(checkpoint_base, latest_run_dir)
+    
+    # Find all checkpoint files in the latest run
+    checkpoint_files = glob.glob(os.path.join(latest_run_path, "model_epoch_*.pt"))
+    
+    if not checkpoint_files:
+        return None
+    
+    # Sort by epoch number and get the latest
+    def extract_epoch_number(checkpoint_file):
+        match = re.search(r'model_epoch_(\d+)\.pt', os.path.basename(checkpoint_file))
+        return int(match.group(1)) if match else 0
+    
+    latest_checkpoint = max(checkpoint_files, key=extract_epoch_number)
+    return latest_checkpoint
+
+def create_eval_save_dir(model_type="diffusion"):
+    """
+    Create evaluation save directory in format: results/{model_type}/eval_{int}/
+    Returns the path to the created directory.
+    """
+    results_base = os.path.join("results", model_type, 'eval')
+    os.makedirs(results_base, exist_ok=True)
+    
+    # Find existing eval directories
+    eval_dirs = []
+    for item in os.listdir(results_base):
+        if os.path.isdir(os.path.join(results_base, item)) and item.startswith("eval_"):
+            eval_dirs.append(item)
+    
+    # Determine next eval number
+    if eval_dirs:
+        def extract_eval_number(eval_dir):
+            match = re.search(r'eval_(\d+)', eval_dir)
+            return int(match.group(1)) if match else 0
+        
+        next_eval_num = max(extract_eval_number(eval_dir) for eval_dir in eval_dirs) + 1
+    else:
+        next_eval_num = 0
+    
+    eval_dir = os.path.join(results_base, f"eval_{next_eval_num}")
+    os.makedirs(eval_dir, exist_ok=True)
+    return eval_dir
+
 
 def train_loop(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -54,11 +131,11 @@ def train_loop(args):
 
     # Extract run number from log_dir (e.g., "runs_5" -> "5")
 
-    eval_base_dir = os.path.join("results", args.model_type)
+    eval_base_dir = os.path.join("results", args.model_type, 'train')
     os.makedirs(eval_base_dir, exist_ok=True)
 
     # Pattern to match run_*
-    run_pattern = re.compile(r"run_(\d+)")
+    run_pattern = re.compile(r"runs_(\d+)")
     run_numbers = []
 
     # Collect all run numbers
@@ -252,8 +329,8 @@ def build_argparser():
     p.add_argument('--eval_only', action='store_true', help='Run evaluation only (no training)')
 
 
-    p.add_argument('--ckpt_path', type=str, default='', help='Path to model checkpoint for eval')
-    p.add_argument('--eval_save_dir', type=str, default='./eval_outputs', help='Where to save eval plots')
+    p.add_argument('--ckpt_path', type=str, default=None, help='Path to model checkpoint for eval')
+    p.add_argument('--eval_save_dir', type=str, default=None, help='Where to save eval plots')
     return p
 
 
@@ -262,6 +339,17 @@ if __name__ == '__main__':
     if args.eval_only:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = Denoiser().to(device)
+        
+        # Auto-find latest checkpoint if not provided
+        if not args.ckpt_path:
+            latest_ckpt = find_latest_checkpoint(args.model_type)
+            if latest_ckpt:
+                args.ckpt_path = latest_ckpt
+                print(f"Auto-found latest checkpoint: {args.ckpt_path}")
+            else:
+                print("Warning: No checkpoint found. Evaluating with randomly initialized model.")
+        
+        # Load checkpoint if available
         if args.ckpt_path and os.path.isfile(args.ckpt_path):
             print(f"Loading checkpoint: {args.ckpt_path}")
             state = torch.load(args.ckpt_path, map_location=device)
@@ -269,6 +357,11 @@ if __name__ == '__main__':
         else:
             if args.ckpt_path:
                 print(f"Warning: checkpoint not found at {args.ckpt_path}. Evaluating with randomly initialized model.")
+
+        # Auto-create eval save directory if not provided
+        if not args.eval_save_dir or args.eval_save_dir == './eval_outputs':
+            args.eval_save_dir = create_eval_save_dir(args.model_type)
+            print(f"Auto-created eval save directory: {args.eval_save_dir}")
 
         os.makedirs(args.eval_save_dir, exist_ok=True)
         avg_val_loss, val_fig = calculate_validation_loss_and_plot(
