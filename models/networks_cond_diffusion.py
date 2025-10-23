@@ -291,7 +291,7 @@ class Denoiser(nn.Module):
         super(Denoiser, self).__init__()
         # FeatureMLP now expects concatenated features: base_embed + cond_embed
         # so input_dim = embed_dim (from embed_features) + embed_dim (from cond)
-        self.feature_mlp = FeatureMLP(input_dim = embed_dim * 2, output_dim=256)  
+        self.feature_mlp = FeatureMLP(input_dim = embed_dim*2 , output_dim=256)  
         self.roadgraph_mlp = RoadGraphMLP()
         self.output_mlp = OutputMLP()
         # no change to transformer blocks themselves; they operate on output_dim=256
@@ -355,3 +355,4 @@ class Denoiser(nn.Module):
 
 if __name__ == "__main__":
     print("all good!")
+
