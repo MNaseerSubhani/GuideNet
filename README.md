@@ -94,6 +94,9 @@ bash run_diffusion_cond.sh train
 
 # Evaluate trained model
 bash run_diffusion_cond.sh eval
+
+# Evaluate trained  without condition 
+bash run_diffusion_cond.sh eval False
 ```
 
 
