@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
+
+
 def plot_trajectories(map_polylines, polyline_masks, pred_traj, gt_traj, noisy_traj, trajectory_mask, ego_id, save_path=None, eval=False, title_suffix=""):
     """
     Plot predicted and ground truth trajectories side by side in a single figure for all agents.

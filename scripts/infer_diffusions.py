@@ -9,8 +9,33 @@ from torch import amp
 from dataset.map_pre_old import MapDataset
 from utils.utils import plot_trajectories, embed_features
 
+
+
+
+
+
 # -------------------- constants --------------------
 EMBED_DX = 1280  # must match networks_2.FeatureMLP(input_dim)
+class CondProjConcat(torch.nn.Module):
+    """
+    Maps direction one-hot [B,A,3] -> embedding [B,A,EMBED_DX] for concatenation conditioning.
+    Also includes a learned null embedding used when we drop the condition (classifier-free).
+    """
+    def __init__(self, out_dim: int = EMBED_DX):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.Linear(3, 128), torch.nn.SiLU(),
+            torch.nn.Linear(128, out_dim)
+        )
+        # learned null token for unconditional examples (shape: [1, out_dim])
+        self.null_token = torch.nn.Parameter(torch.zeros(1, out_dim))
+
+    def forward(self, y_onehot: torch.Tensor) -> torch.Tensor:
+        # y_onehot: [B,A,3] or [B,3]
+        if y_onehot.dim() == 2:
+            y_onehot = y_onehot.unsqueeze(1)  # [B,1,3]
+        emb = self.net(y_onehot)  # [B,A,out_dim]
+        return emb  # caller handles replacing with null_token for dropped condition
 
 # -------------------- small helpers --------------------
 
@@ -114,6 +139,82 @@ def load_cond_proj_partial(module: torch.nn.Module, sd_raw: Dict[str, torch.Tens
     if msg.missing_keys or msg.unexpected_keys:
         print(f"[COND_PROJ] missing: {msg.missing_keys}, unexpected: {msg.unexpected_keys}")
 
+
+def compute_road_boundary_distance(predictions, roadgraph_tensor, roadgraph_mask, scene_std):
+    """
+    Compute distance from predicted trajectories to nearest road boundaries.
+    
+    Args:
+        predictions: [B, A, T, 3] - predicted trajectories (x, y, theta)
+        roadgraph_tensor: [B, RG, NUM_POINTS, 2] - road polylines (x, y)
+        roadgraph_mask: [B, RG] - mask for valid polylines
+        scene_std: [3] - standard deviation for scaling (x, y, theta)
+    
+    Returns:
+        distances: [B, A, T] - minimum distance to road boundaries
+    """
+    B, A, T, _ = predictions.shape
+    B, RG, NUM_POINTS, _ = roadgraph_tensor.shape
+
+    # Extract and rescale predicted (x, y)
+    pred_xy = predictions[..., :2]  # [B, A, T, 2]
+    scale_xy = scene_std[:2]
+    pred_xy = pred_xy / scale_xy[None, None, None, :]  # back to world coords
+
+    # Initialize output
+    min_distances = torch.full((B, A, T), 1e3, device=predictions.device)
+
+    for b in range(B):
+        mask = roadgraph_mask[b]
+        if not mask.any():
+            continue
+
+        road_points = roadgraph_tensor[b, mask]  # [N_valid, NUM_POINTS, 2]
+        road_points = road_points.reshape(-1, 2)  # flatten to all boundary points
+
+        preds = pred_xy[b].reshape(-1, 2)  # [A*T, 2]
+        distances = torch.cdist(preds, road_points, p=2)  # [A*T, N_points]
+        min_dists = distances.min(dim=1)[0]  # [A*T]
+
+        min_distances[b] = min_dists.view(A, T)
+
+    return min_distances
+
+
+def road_boundary_mask_loss(predictions, roadgraph_tensor, roadgraph_mask, scene_std, 
+                           boundary_threshold=5.0, loss_weight=1.0):
+    """
+    Compute mask loss that penalizes predictions outside road boundaries.
+    
+    Args:
+        predictions: [B, A, T, 3] - predicted trajectories
+        roadgraph_tensor: [B, RG, NUM_POINTS, 2] - road polylines
+        roadgraph_mask: [B, RG] - mask for valid polylines
+        scene_std: [3] - standard deviation for scaling
+        boundary_threshold: float - distance threshold for road boundaries
+        loss_weight: float - weight for this loss component
+    
+    Returns:
+        loss: scalar tensor - road boundary mask loss
+    """
+    distances = compute_road_boundary_distance(predictions, roadgraph_tensor, roadgraph_mask, scene_std)
+
+    # Create mask for points outside road boundaries
+    outside_mask = distances > boundary_threshold  # [B, A, T]
+    
+    # Compute loss only for points outside boundaries
+    if outside_mask.any():
+        # Penalty increases with distance from road
+        penalty = torch.clamp(distances - boundary_threshold, min=0.0)  # [B, A, T]
+        penalty = penalty * outside_mask.float()  # Only apply to outside points
+        
+        # Average loss over all outside points
+        loss = penalty.sum() / (outside_mask.sum() + 1e-6)  # Avoid division by zero
+        return loss_weight * loss
+    else:
+        return torch.tensor(0.0, device=predictions.device, requires_grad=True)
+
+
 # ...
 
 # ------------------------------------------------------------
@@ -132,7 +233,8 @@ def calculate_validation_loss_and_plot(
     direction_command=False,  # NEU: Bedingung (z.B. "left")
     cond_scale: float = 2.0,                 # NEU: CFG-Skalierung (z.B. 2.0)
     cond_proj_state_dict: Optional[Dict[str, Any]] = None, # NEU: Zum Laden des Cond-Projektors
-    turn_thresh_deg: float = 15.0            # NEU: Für die Berechnung der Ground-Truth-Richtung
+    turn_thresh_deg: float = 15.0,            # NEU: Für die Berechnung der Ground-Truth-Richtung
+    Flag_cond : bool = True
 ):
     """
     Führt eine bedingte Validierungsrunde aus und gibt (avg_val_loss, figure) zurück.
@@ -146,7 +248,7 @@ def calculate_validation_loss_and_plot(
     # condition projector only if AUTO
     cond_proj = None
     if direction_command is True:
-        cond_proj = CondProj_Additive(EMBED_DX).to(device).eval()
+        cond_proj = CondProjConcat(EMBED_DX).to(device).eval()
         if cond_proj_state_dict:
             load_cond_proj_partial(cond_proj, cond_proj_state_dict) #Warum aber hier eigentlich
 
@@ -256,16 +358,26 @@ def calculate_validation_loss_and_plot(
                         return torch.cat([base_emb, cond_full], dim=-1)
                     # If direction_command is False, we do unconditional prediction only
                     if direction_command is True:
-                        # conditional
-                        base_emb_cond = _embed_precond(full_seq_base, c_in, c_noise)
-                        emb_cond = concat_embed(base_emb_cond, current_c_cond_time)
-                        model_out_cond = model(emb_cond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
-                        # unconditional
-                        base_emb_uncond = _embed_precond(full_seq_base, c_in, c_noise)
-                        emb_uncond = concat_embed(base_emb_uncond, uncond_time_tensor)
-                        model_out_uncond = model(emb_uncond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
-                        # CFG
-                        model_out = model_out_uncond + cond_scale * (model_out_cond - model_out_uncond)
+
+                        if Flag_cond:
+                            # conditional
+                            base_emb_cond = _embed_precond(full_seq_base, c_in, c_noise)
+                            emb_cond = concat_embed(base_emb_cond, current_c_cond_time)
+                            model_out_cond = model(emb_cond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
+                            # unconditional
+                            base_emb_uncond = _embed_precond(full_seq_base, c_in, c_noise)
+                            emb_uncond = concat_embed(base_emb_uncond, uncond_time_tensor)
+                            model_out_uncond = model(emb_uncond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
+                            # CFG
+                            model_out = model_out_uncond + cond_scale * (model_out_cond - model_out_uncond)
+                        else:
+                            
+                            # unconditional
+                            base_emb_uncond = _embed_precond(full_seq_base, c_in, c_noise)
+                            emb_uncond = concat_embed(base_emb_uncond, uncond_time_tensor)
+                            model_out_uncond = model(emb_uncond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
+                            # CFG
+                            model_out = model_out_uncond 
                     else:
                         base_emb_uncond = _embed_precond(full_seq_base, c_in, c_noise)
                         emb_uncond = _add_condition_to_embed(base_emb_uncond, uncond_time_tensor, obs_len)
@@ -325,6 +437,7 @@ def calculate_validation_loss_and_plot(
                 base_emb_final = embed_features(model_in_final, c_noise_final, eval=True)
                 
                 if direction_command is True:
+
                     cond_tensor_final = current_c_cond_time
                     emb_final_cond = concat_embed(base_emb_final, cond_tensor_final)
                     out_final_cond = model(emb_final_cond, roadgraph_tensor, full_mask_in, roadgraph_mask)[:, :, obs_len:, :]
@@ -339,10 +452,24 @@ def calculate_validation_loss_and_plot(
 
                 final_pred_x0 = c_skip_final * x + c_out_final * model_out_final
 
+                # Add road_boundary_mask_loss to final loss calculation
+                road_boundary_loss = road_boundary_mask_loss(
+                    predictions=final_pred_x0,
+                    roadgraph_tensor=roadgraph_tensor,
+                    roadgraph_mask=roadgraph_mask,
+                    scene_std=scene_stds[0],
+                    boundary_threshold=0,  # Match training default
+                    loss_weight=1  # Match training default
+                )
+                
+
                 # Loss (nur wo Maske==1)
+           
                 valid_mask_loss = gt_future_mask.unsqueeze(-1)  # [B,A,Tp,1]
-                loss = (final_pred_x0 - gt_future_part).pow(2) * valid_mask_loss
-                total_loss  += loss.sum().item()
+                loss = (final_pred_x0 - gt_future_part).pow(2) * valid_mask_loss + road_boundary_loss
+                total_loss += loss.sum().item()
+                # loss = (final_pred_x0 - gt_future_part).pow(2) * valid_mask_loss
+                # total_loss  += loss.sum().item()
                 total_valid += valid_mask_loss.sum().item()
 
                 # --- PLOT-BLOCK (FEHLERFREI) ---

@@ -1,3 +1,11 @@
+
+
+
+
+
+
+
+
 import os
 import math
 import time
@@ -21,6 +29,7 @@ from dataset.map_pre_old import MapDataset
 from models.networks_cond_diffusion import Denoiser
 from utils.utils import embed_features, sample_noise
 from scripts.infer_diffusions import calculate_validation_loss_and_plot, direction_onehot_from_theta
+import torch.nn.functional as F
 
 
 EMBED_DX = 1280  # must match networks_2.FeatureMLP(input_dim)
@@ -69,6 +78,141 @@ class CondProjConcat(torch.nn.Module):
 
 def _bool(s):
     return str(s).lower() in {"1", "true", "yes", "y"}
+
+
+def compute_road_boundary_distance(predictions, roadgraph_tensor, roadgraph_mask, scene_std):
+    """
+    Compute distance from predicted trajectories to nearest road boundaries.
+    
+    Args:
+        predictions: [B, A, T, 3] - predicted trajectories (x, y, theta)
+        roadgraph_tensor: [B, RG, NUM_POINTS, 2] - road polylines (x, y)
+        roadgraph_mask: [B, RG] - mask for valid polylines
+        scene_std: [3] - standard deviation for scaling (x, y, theta)
+    
+    Returns:
+        distances: [B, A, T] - minimum distance to road boundaries
+    """
+    B, A, T, _ = predictions.shape
+    B, RG, NUM_POINTS, _ = roadgraph_tensor.shape
+
+    # Extract and rescale predicted (x, y)
+    pred_xy = predictions[..., :2]  # [B, A, T, 2]
+    scale_xy = scene_std[:2]
+    pred_xy = pred_xy / scale_xy[None, None, None, :]  # back to world coords
+
+    # Initialize output
+    min_distances = torch.full((B, A, T), 1e3, device=predictions.device)
+
+    for b in range(B):
+        mask = roadgraph_mask[b]
+        if not mask.any():
+            continue
+
+        road_points = roadgraph_tensor[b, mask]  # [N_valid, NUM_POINTS, 2]
+        road_points = road_points.reshape(-1, 2)  # flatten to all boundary points
+
+        preds = pred_xy[b].reshape(-1, 2)  # [A*T, 2]
+        distances = torch.cdist(preds, road_points, p=2)  # [A*T, N_points]
+        min_dists = distances.min(dim=1)[0]  # [A*T]
+
+        min_distances[b] = min_dists.view(A, T)
+
+    return min_distances
+
+
+# def compute_road_boundary_distance(predictions, roadgraph_tensor, roadgraph_mask, scene_std):
+#     """
+#     Compute distance from predicted trajectories to road boundaries.
+    
+#     Args:
+#         predictions: [B, A, T, 3] - predicted trajectories (x, y, theta)
+#         roadgraph_tensor: [B, RG, NUM_POINTS, 2] - road polylines (x, y)
+#         roadgraph_mask: [B, RG] - mask for valid polylines
+#         scene_std: [3] - standard deviation for scaling (x, y, theta)
+    
+#     Returns:
+#         distances: [B, A, T] - minimum distance to road boundaries
+#     """
+#     B, A, T, _ = predictions.shape
+#     B, RG, NUM_POINTS, _ = roadgraph_tensor.shape
+    
+#     # Extract x, y coordinates from predictions
+#     pred_xy = predictions[:, :, :, :2]  # [B, A, T, 2]
+    
+#     # Scale predictions back to original coordinates for distance calculation
+#     scale_xy = scene_std[:2]  # [2]
+#     pred_xy_original = pred_xy / scale_xy[None, None, None, :]
+    
+#     # Initialize distances with large values
+#     min_distances = torch.full((B, A, T), 1000.0, device=predictions.device)
+    
+#     # Process each batch element separately to handle different roadgraph masks
+#     for b in range(B):
+#         # Get valid road polylines for this batch element
+#         batch_roadgraph = roadgraph_tensor[b]  # [RG, NUM_POINTS, 2]
+#         batch_mask = roadgraph_mask[b]  # [RG]
+        
+#         if not batch_mask.any():
+#             continue  # No valid roads for this batch element
+            
+#         valid_roads = batch_roadgraph[batch_mask]  # [N_valid_roads, NUM_POINTS, 2]
+        
+#         # Scale road polylines back to original coordinates
+#         valid_roads_original = valid_roads / scale_xy[None, None, :]
+        
+#         # Get predictions for this batch element
+#         batch_pred_xy = pred_xy_original[b]  # [A, T, 2]
+        
+#         # Reshape for distance calculation
+#         pred_flat = batch_pred_xy.view(A * T, 1, 2)  # [A*T, 1, 2]
+#         roads_flat = valid_roads_original.view(1, -1, 2)  # [1, N_valid_roads*NUM_POINTS, 2]
+        
+#         # Compute pairwise distances
+#         distances = torch.cdist(pred_flat, roads_flat, p=2)  # [A*T, 1, N_road_points]
+        
+#         # Find minimum distance for each prediction point
+#         batch_min_distances = distances.min(dim=-1)[0]  # [A*T]
+        
+#         # Reshape and store
+#         min_distances[b] = batch_min_distances.view(A, T)
+    
+#     return min_distances
+
+
+def road_boundary_mask_loss(predictions, roadgraph_tensor, roadgraph_mask, scene_std, 
+                           boundary_threshold=5.0, loss_weight=1.0):
+    """
+    Compute mask loss that penalizes predictions outside road boundaries.
+    
+    Args:
+        predictions: [B, A, T, 3] - predicted trajectories
+        roadgraph_tensor: [B, RG, NUM_POINTS, 2] - road polylines
+        roadgraph_mask: [B, RG] - mask for valid polylines
+        scene_std: [3] - standard deviation for scaling
+        boundary_threshold: float - distance threshold for road boundaries
+        loss_weight: float - weight for this loss component
+    
+    Returns:
+        loss: scalar tensor - road boundary mask loss
+    """
+    distances = compute_road_boundary_distance(predictions, roadgraph_tensor, roadgraph_mask, scene_std)
+    
+    # Create mask for points outside road boundaries
+    outside_mask = distances > boundary_threshold  # [B, A, T]
+    
+    # Compute loss only for points outside boundaries
+    if outside_mask.any():
+        # Penalty increases with distance from road
+        penalty = torch.clamp(distances - boundary_threshold, min=0.0)  # [B, A, T]
+        penalty = penalty * outside_mask.float()  # Only apply to outside points
+        
+        # Average loss over all outside points
+        loss = penalty.sum() / (outside_mask.sum() + 1e-6)  # Avoid division by zero
+        return loss_weight * loss
+    else:
+        return torch.tensor(0.0, device=predictions.device, requires_grad=True)
+
 
 
 def create_dataloaders(xml_dir: str, batch_size: int, num_workers: int,
@@ -164,6 +308,8 @@ def create_eval_save_dir(model_type="diffusion_cond"):
     return eval_dir
 
 
+
+
 def train_loop(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     scaler = amp.GradScaler('cuda') if device.type == 'cuda' else None
@@ -206,10 +352,26 @@ def train_loop(args):
     )
 
     model = Denoiser(embed_dim=EMBED_DX).to(device)
+
+    state = torch.load("/home/tic/Desktop/GuideNet/checkpoints/diffusion_cond/runs_18/model_epoch_700.pt", map_location=device)
+    
+
     model.train()
 
     # conditioning projector (additive over future embedding)
     cond_proj = CondProjConcat(EMBED_DX).to(device)
+
+    if isinstance(state, dict) and "model" in state:
+        model.load_state_dict(state["model"])
+        if "cond_proj" in state:
+            cond_proj.load_state_dict(state["cond_proj"])
+            print("Loaded cond_proj from checkpoint")
+        else:
+            print("Warning: cond_proj not found in checkpoint")
+    else:
+        # Legacy checkpoint format (only model state dict)
+        model.load_state_dict(state)
+        print("Warning: Legacy checkpoint format - cond_proj not loaded")
 
     optimizer = optim.Adam(model.parameters(), lr=0.0)
     optimizer.add_param_group({"params": cond_proj.parameters(), "lr": 0.0})  # same LR schedule
@@ -335,10 +497,12 @@ def train_loop(args):
 
                 # forward through model (remember model expects embed_dim*2 in FeatureMLP)
                 model_out = model(embedded_concat, roadgraph_tensor, feature_mask, roadgraph_mask)[:, :, args.obs_len:, :]
+                
+                
                 gt_pred   = feature_tensor[:, :, args.obs_len:, :]
                 mask_pred = feature_mask[:, :, args.obs_len:]
                 valid_mask = mask_pred.unsqueeze(-1).expand_as(gt_pred)
-
+                # out_of_bounds = (valid_mask == 0)  # Identify out-of-bounds predictions
                 recon = model_out * c_out[:, None, None, None] + noised_tensor[:, :, args.obs_len:, :] * c_skip[:, None, None, None]
 
                 squared_diff = (recon - gt_pred) ** 2
@@ -346,7 +510,20 @@ def train_loop(args):
                 loss_per_batch = masked_squared_diff.sum(dim=[1, 2, 3]) / valid_mask.sum(dim=[1, 2, 3]).clamp(min=1e-6)
 
                 weight = (sigma**2 + sigma_data**2) / (sigma * sigma_data)**2
-                loss = (loss_per_batch * weight).mean()
+                diffusion_loss = (loss_per_batch * weight).mean()
+                
+                
+                road_boundary_loss = road_boundary_mask_loss(
+                    predictions=recon,
+                    roadgraph_tensor=roadgraph_tensor,
+                    roadgraph_mask=roadgraph_mask,
+                    scene_std=scene_stds[0],  # Use first sample's std for all in batch
+                    boundary_threshold=args.boundary_threshold,
+                    loss_weight=args.road_boundary_loss_weight
+                )
+                
+                # Combine losses
+                loss = diffusion_loss + road_boundary_loss
 
             if scaler:
                 scaler.scale(loss).backward()
@@ -364,6 +541,8 @@ def train_loop(args):
                 pg["lr"] = lr
 
             writer.add_scalar("train/iter_loss", float(loss.item()), global_step)
+            writer.add_scalar("train/diffusion_loss", float(diffusion_loss.item()), global_step)
+            writer.add_scalar("train/road_boundary_loss", float(road_boundary_loss.item()), global_step)
             writer.add_scalar("train/lr", float(lr), global_step)
             writer.add_scalar("train/grad_norm", float(grad_norm), global_step)
             writer.add_scalar("train/sigma_example0", float(sigma[0].item()), global_step)
@@ -404,6 +583,8 @@ def train_loop(args):
                 cond_scale=args.cond_scale,
                 turn_thresh_deg=args.turn_thresh_deg,
                 cond_proj_state_dict=cond_proj.state_dict(),
+                Flag_cond = args.condition
+
             )
             print(f"Val @ epoch {epoch}: {avg_val_loss:.4f}")
             if not np.isnan(avg_val_loss):
@@ -421,6 +602,7 @@ def train_loop(args):
 
     writer.close()
     print("Training completed.")
+
 
 
 def build_argparser():
@@ -452,10 +634,16 @@ def build_argparser():
     # Conditioning guidance for eval
     p.add_argument('--cond_scale', type=float, default=2.0, help='Classifier-free guidance scale during eval')
 
+    # Road boundary mask loss parameters
+    p.add_argument('--road_boundary_loss_weight', type=float, default=1, help='Weight for road boundary mask loss')
+    p.add_argument('--boundary_threshold', type=float, default=0, help='Distance threshold for road boundaries (meters)')
+    
     # Evaluation options
     p.add_argument('--eval_only', action='store_true', help='Run evaluation only (no training)')
     p.add_argument('--ckpt_path', type=str, default=None, help='Path to model checkpoint for eval')
     p.add_argument('--eval_save_dir', type=str, default=None, help='Where to save eval plots')
+
+    p.add_argument('--condition', type=bool, default=False, help='Condition Flag')
     return p
 
 
@@ -465,6 +653,7 @@ if __name__ == '__main__':
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model = Denoiser().to(device)
         cond_proj = CondProjConcat(EMBED_DX).to(device)
+      
         
         # Auto-find latest checkpoint if not provided
         if not args.ckpt_path:
@@ -498,7 +687,7 @@ if __name__ == '__main__':
         if not args.eval_save_dir or args.eval_save_dir == './eval_outputs':
             args.eval_save_dir = create_eval_save_dir(args.model_type)
             print(f"Auto-created eval save directory: {args.eval_save_dir}")
-
+        
         os.makedirs(args.eval_save_dir, exist_ok=True)
         avg_val_loss, val_fig = calculate_validation_loss_and_plot(
             model=model,
@@ -516,6 +705,7 @@ if __name__ == '__main__':
             cond_scale=args.cond_scale,
             turn_thresh_deg=args.turn_thresh_deg,
             cond_proj_state_dict=cond_proj.state_dict(),
+            Flag_cond = args.condition,
         )
         print(f"Eval avg loss: {avg_val_loss:.6f}")
         if val_fig is not None:
