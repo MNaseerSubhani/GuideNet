@@ -353,7 +353,7 @@ def train_loop(args):
 
     model = Denoiser(embed_dim=EMBED_DX).to(device)
 
-    state = torch.load("/home/tic/Desktop/GuideNet/checkpoints/diffusion_cond/runs_18/model_epoch_700.pt", map_location=device)
+    # state = torch.load("/home/tic/Desktop/GuideNet/checkpoints/diffusion_cond/runs_18/model_epoch_700.pt", map_location=device)
     
 
     model.train()
