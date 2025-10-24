@@ -359,17 +359,7 @@ def train_loop(args):
     # conditioning projector (additive over future embedding)
     cond_proj = CondProjConcat(EMBED_DX).to(device)
 
-    # if isinstance(state, dict) and "model" in state:
-    #     model.load_state_dict(state["model"])
-    #     if "cond_proj" in state:
-    #         cond_proj.load_state_dict(state["cond_proj"])
-    #         print("Loaded cond_proj from checkpoint")
-    #     else:
-    #         print("Warning: cond_proj not found in checkpoint")
-    # else:
-    #     # Legacy checkpoint format (only model state dict)
-    #     model.load_state_dict(state)
-    #     print("Warning: Legacy checkpoint format - cond_proj not loaded")
+  
 
     optimizer = optim.Adam(model.parameters(), lr=0.0)
     optimizer.add_param_group({"params": cond_proj.parameters(), "lr": 0.0})  # same LR schedule
