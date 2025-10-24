@@ -453,20 +453,20 @@ def calculate_validation_loss_and_plot(
                 final_pred_x0 = c_skip_final * x + c_out_final * model_out_final
 
                 # Add road_boundary_mask_loss to final loss calculation
-                road_boundary_loss = road_boundary_mask_loss(
-                    predictions=final_pred_x0,
-                    roadgraph_tensor=roadgraph_tensor,
-                    roadgraph_mask=roadgraph_mask,
-                    scene_std=scene_stds[0],
-                    boundary_threshold=0,  # Match training default
-                    loss_weight=0.1  # Match training default
-                )
+                # road_boundary_loss = road_boundary_mask_loss(
+                #     predictions=final_pred_x0,
+                #     roadgraph_tensor=roadgraph_tensor,
+                #     roadgraph_mask=roadgraph_mask,
+                #     scene_std=scene_stds[0],
+                #     boundary_threshold=0,  # Match training default
+                #     loss_weight=0.1  # Match training default
+                # )
 
 
                 # Loss (nur wo Maske==1)
            
                 valid_mask_loss = gt_future_mask.unsqueeze(-1)  # [B,A,Tp,1]
-                loss = (final_pred_x0 - gt_future_part).pow(2) * valid_mask_loss + road_boundary_loss
+                loss = (final_pred_x0 - gt_future_part).pow(2) * valid_mask_loss #+ road_boundary_loss
                 total_loss += loss.sum().item()
                 # loss = (final_pred_x0 - gt_future_part).pow(2) * valid_mask_loss
                 # total_loss  += loss.sum().item()
