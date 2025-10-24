@@ -3,6 +3,9 @@ import torch.nn as nn
 import math
 from typing import Dict
 
+
+drop_ou = 0
+
 class DiscreteCondProj(nn.Module):
     def __init__(self, in_dim=3, hid=128, out_dim=128):
         super().__init__()
@@ -14,7 +17,7 @@ class DiscreteCondProj(nn.Module):
         return self.net(y_onehot)
 class AgentSelfAttention(nn.Module):
     """Temporal self-attention within each agent over its own time steps with multi-head attention."""
-    def __init__(self, input_dim=256, d_k=256, dropout=0.1):
+    def __init__(self, input_dim=256, d_k=256, dropout=drop_ou):
         super().__init__()
         self.input_dim = input_dim
         self.d_k = d_k
@@ -79,7 +82,7 @@ class AgentSelfAttention(nn.Module):
 
 class AgentCrossAttention(nn.Module):
     """Self-attention across agents at each time step with multi-head attention."""
-    def __init__(self, input_dim=256, d_k=256, dropout=0.1):
+    def __init__(self, input_dim=256, d_k=256, dropout=drop_ou):
         super().__init__()
         self.input_dim = input_dim
         self.d_k = d_k
@@ -149,7 +152,7 @@ class AgentCrossAttention(nn.Module):
 
 class AgentRoadGraphAttention(nn.Module):
     """Cross-attention where each agent attends to roadgraph features with multi-head attention."""
-    def __init__(self, input_dim=256, d_k=256, dropout=0.1):
+    def __init__(self, input_dim=256, d_k=256, dropout=drop_ou):
         super().__init__()
         self.input_dim = input_dim
         self.d_k = d_k
@@ -244,7 +247,7 @@ class OutputMLP(nn.Module):
         return h_3
 
 class FeedForwardNN(nn.Module):
-    def __init__(self, input_dim=256, hidden_dim=1028, dropout_rate=0.1):
+    def __init__(self, input_dim=256, hidden_dim=1028, dropout_rate=drop_ou):
         super(FeedForwardNN, self).__init__()
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
