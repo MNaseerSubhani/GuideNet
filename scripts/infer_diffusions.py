@@ -459,9 +459,9 @@ def calculate_validation_loss_and_plot(
                     roadgraph_mask=roadgraph_mask,
                     scene_std=scene_stds[0],
                     boundary_threshold=0,  # Match training default
-                    loss_weight=1  # Match training default
+                    loss_weight=0.1  # Match training default
                 )
-                
+
 
                 # Loss (nur wo Maske==1)
            

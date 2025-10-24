@@ -353,25 +353,24 @@ def train_loop(args):
 
     model = Denoiser(embed_dim=EMBED_DX).to(device)
 
-    state = torch.load("/home/tic/Desktop/GuideNet/checkpoints/diffusion_cond/runs_18/model_epoch_700.pt", map_location=device)
-    
+
 
     model.train()
 
     # conditioning projector (additive over future embedding)
     cond_proj = CondProjConcat(EMBED_DX).to(device)
 
-    if isinstance(state, dict) and "model" in state:
-        model.load_state_dict(state["model"])
-        if "cond_proj" in state:
-            cond_proj.load_state_dict(state["cond_proj"])
-            print("Loaded cond_proj from checkpoint")
-        else:
-            print("Warning: cond_proj not found in checkpoint")
-    else:
-        # Legacy checkpoint format (only model state dict)
-        model.load_state_dict(state)
-        print("Warning: Legacy checkpoint format - cond_proj not loaded")
+    # if isinstance(state, dict) and "model" in state:
+    #     model.load_state_dict(state["model"])
+    #     if "cond_proj" in state:
+    #         cond_proj.load_state_dict(state["cond_proj"])
+    #         print("Loaded cond_proj from checkpoint")
+    #     else:
+    #         print("Warning: cond_proj not found in checkpoint")
+    # else:
+    #     # Legacy checkpoint format (only model state dict)
+    #     model.load_state_dict(state)
+    #     print("Warning: Legacy checkpoint format - cond_proj not loaded")
 
     optimizer = optim.Adam(model.parameters(), lr=0.0)
     optimizer.add_param_group({"params": cond_proj.parameters(), "lr": 0.0})  # same LR schedule
@@ -635,7 +634,7 @@ def build_argparser():
     p.add_argument('--cond_scale', type=float, default=2.0, help='Classifier-free guidance scale during eval')
 
     # Road boundary mask loss parameters
-    p.add_argument('--road_boundary_loss_weight', type=float, default=1, help='Weight for road boundary mask loss')
+    p.add_argument('--road_boundary_loss_weight', type=float, default=0.1, help='Weight for road boundary mask loss')
     p.add_argument('--boundary_threshold', type=float, default=0, help='Distance threshold for road boundaries (meters)')
     
     # Evaluation options
