@@ -60,11 +60,70 @@ def plot_trajectories(map_polylines, polyline_masks, pred_traj, gt_traj, noisy_t
 
     A = pred_traj.shape[0]  # Number of agents
 
-    # --- Compute plot limits based on map and *valid* trajectories ---
-    valid_polylines_list = [map_polylines[i] for i in range(map_polylines.shape[0]) if polyline_masks[i]]
-    all_x_road = np.concatenate([p[:, 0] for p in valid_polylines_list if p.shape[0] > 0]) if valid_polylines_list else np.array([])
-    all_y_road = np.concatenate([p[:, 1] for p in valid_polylines_list if p.shape[0] > 0]) if valid_polylines_list else np.array([])
+    # --- Find ego agent index ---
+    # Convert ego_id to integer if it's a string, and find the corresponding agent index
 
+    try:
+        ego_id_int = int(ego_id) if isinstance(ego_id, str) else ego_id
+        # Check if ego_id is a valid agent index
+        if 0 <= ego_id_int < A:
+            ego_agent_idx = ego_id_int
+            # print(f"DEBUG: ego_agent_idx = {ego_agent_idx} (direct mapping)")
+        else:
+            # If ego_id is out of bounds, assume ego agent is the first agent (index 0)
+            # This is a common convention in trajectory prediction datasets
+            ego_agent_idx = 0
+            # print(f"DEBUG: ego_id {ego_id_int} out of bounds [0, {A-1}], using agent 0 as ego")
+    except (ValueError, TypeError):
+        # If ego_id is not a valid integer, assume it's the first agent (index 0)
+        ego_agent_idx = 0
+        print(f"Warning: Could not parse ego_id '{ego_id}', using agent 0 as ego")
+
+    # --- Compute plot limits based on ego agent's trajectory and nearby map ---
+    # Focus on ego agent's trajectory for zooming
+    ego_x_traj, ego_y_traj = [], []
+    if ego_agent_idx < A:
+        valid_mask_ego = trajectory_mask[ego_agent_idx].astype(bool)
+        if np.any(valid_mask_ego):
+            ego_x_traj = pred_traj[ego_agent_idx, valid_mask_ego, 0]
+            ego_y_traj = pred_traj[ego_agent_idx, valid_mask_ego, 1]
+            # Also include ground truth for ego agent
+            ego_x_traj = np.concatenate([ego_x_traj, gt_traj[ego_agent_idx, valid_mask_ego, 0]])
+            ego_y_traj = np.concatenate([ego_y_traj, gt_traj[ego_agent_idx, valid_mask_ego, 1]])
+            # print(f"DEBUG: Found ego agent trajectory with {len(ego_x_traj)} points")
+        else:
+            print(f"DEBUG: No valid trajectory data for ego agent {ego_agent_idx}")
+    else:
+        print(f"DEBUG: ego_agent_idx {ego_agent_idx} >= A {A}, using fallback")
+
+    # Get nearby map polylines (within a reasonable distance of ego agent)
+    if len(ego_x_traj) > 0 and len(ego_y_traj) > 0:
+        ego_center_x = np.mean(ego_x_traj)
+        ego_center_y = np.mean(ego_y_traj)
+        # print(f"DEBUG: Ego center at ({ego_center_x:.2f}, {ego_center_y:.2f})")
+        
+        # Filter map polylines that are within a reasonable distance of ego agent
+        nearby_polylines = []
+        for i in range(map_polylines.shape[0]):
+            if polyline_masks[i]:
+                poly = map_polylines[i]
+                if poly.shape[0] > 0 and not np.allclose(poly, 0.0):
+                    # Check if any point in polyline is within reasonable distance
+                    distances = np.sqrt((poly[:, 0] - ego_center_x)**2 + (poly[:, 1] - ego_center_y)**2)
+                    if np.min(distances) < 100:  # Within 100 meters
+                        nearby_polylines.append(poly)
+        
+        all_x_road = np.concatenate([p[:, 0] for p in nearby_polylines]) if nearby_polylines else np.array([])
+        all_y_road = np.concatenate([p[:, 1] for p in nearby_polylines]) if nearby_polylines else np.array([])
+        # print(f"DEBUG: Found {len(nearby_polylines)} nearby polylines")
+    else:
+        # Fallback to all polylines if ego agent data is not available
+        valid_polylines_list = [map_polylines[i] for i in range(map_polylines.shape[0]) if polyline_masks[i]]
+        all_x_road = np.concatenate([p[:, 0] for p in valid_polylines_list if p.shape[0] > 0]) if valid_polylines_list else np.array([])
+        all_y_road = np.concatenate([p[:, 1] for p in valid_polylines_list if p.shape[0] > 0]) if valid_polylines_list else np.array([])
+        # print(f"DEBUG: Using fallback - all polylines")
+
+    # Include all trajectory data for limits calculation
     all_x_traj, all_y_traj = [], []
     for a in range(A):
         # Use boolean mask directly for indexing
@@ -82,27 +141,33 @@ def plot_trajectories(map_polylines, polyline_masks, pred_traj, gt_traj, noisy_t
     all_x = np.concatenate([all_x_road, all_x_traj_np])
     all_y = np.concatenate([all_y_road, all_y_traj_np])
 
-    # Determine limits, handle empty data case
-    if all_x.size > 0 and all_y.size > 0:
-        # Filter out potential NaN/Inf before calculating min/max
-        finite_x = all_x[np.isfinite(all_x)]
-        finite_y = all_y[np.isfinite(all_y)]
-        if finite_x.size > 0 and finite_y.size > 0:
-            xmin, xmax = np.min(finite_x), np.max(finite_x)
-            ymin, ymax = np.min(finite_y), np.max(finite_y)
-            x_range = max(xmax - xmin, 1.0) # Min range of 1.0
-            y_range = max(ymax - ymin, 1.0)
-            padding = max(x_range, y_range) * 0.1 # 10% padding based on max range
-            xlim = (xmin - padding, xmax + padding)
-            ylim = (ymin - padding, ymax + padding)
-        else:
-            print("Warning: No finite data points found for limit calculation. Using default limits.")
-            xlim = (-20, 20)
-            ylim = (-20, 20)
-    else:
-        print("Warning: No map or trajectory data to determine plot limits. Using default limits.")
-        xlim = (-20, 20)
-        ylim = (-20, 20)
+    # # Determine limits, handle empty data case
+    # if all_x.size > 0 and all_y.size > 0:
+    #     # Filter out potential NaN/Inf before calculating min/max
+    #     finite_x = all_x[np.isfinite(all_x)]
+    #     finite_y = all_y[np.isfinite(all_y)]
+    #     if finite_x.size > 0 and finite_y.size > 0:
+    #         xmin, xmax = np.min(finite_x), np.max(finite_x)
+    #         ymin, ymax = np.min(finite_y), np.max(finite_y)
+    #         x_range = max(xmax - xmin, 1.0) # Min range of 1.0
+    #         y_range = max(ymax - ymin, 1.0)
+    #         # Reduce padding for better zoom on ego agent
+    #         padding = max(x_range, y_range) * 0.05 # 5% padding for tighter zoom
+    #         xlim = (xmin - padding, xmax + padding)
+    #         ylim = (ymin - padding, ymax + padding)
+    #         print(f"DEBUG: Plot limits: x=({xlim[0]:.2f}, {xlim[1]:.2f}), y=({ylim[0]:.2f}, {ylim[1]:.2f})")
+    #     else:
+    #         print("Warning: No finite data points found for limit calculation. Using default limits.")
+    #         xlim = (-20, 20)
+    #         ylim = (-20, 20)
+    # else:
+    #     print("Warning: No map or trajectory data to determine plot limits. Using default limits.")
+    #     xlim = (-20, 20)
+    #     ylim = (-20, 20)
+    # --- Set fixed plot limits from -50 to 50 ---
+    xlim = (-50, 50)
+    ylim = (-50, 50)
+
 
     # --- Plotting ---
     fig, (ax_pred, ax_gt) = plt.subplots(1, 2, figsize=(12, 6), sharex=True, sharey=True) # Share both axes
@@ -132,7 +197,20 @@ def plot_trajectories(map_polylines, polyline_masks, pred_traj, gt_traj, noisy_t
             x = pred_traj[a, valid_mask_a, 0]
             y = pred_traj[a, valid_mask_a, 1]
             theta = pred_traj[a, valid_mask_a, 2]
-            ax_pred.plot(x, y,"o", color=cmap(a % cmap.N), linewidth=1.5,  alpha=0.5) # Use modulo for safety
+            
+            # Use black color for ego agent, colored for others
+            if a == ego_agent_idx:
+                color = 'black'
+                linewidth = 3.0  # Thicker line for ego agent
+                alpha = 1.0
+                # print(f"DEBUG: Plotting ego agent {a} in BLACK")
+            else:
+                color = cmap(a % cmap.N)
+                linewidth = 1.5
+                alpha = 0.5
+                # print(f"DEBUG: Plotting agent {a} in color {color}")
+            
+            ax_pred.plot(x, y, "o", color=color, linewidth=linewidth, alpha=alpha)
 
             # Add arrow at the start of the valid prediction
             x_start, y_start, theta_start = x[0], y[0], theta[0]
@@ -140,7 +218,7 @@ def plot_trajectories(map_polylines, polyline_masks, pred_traj, gt_traj, noisy_t
             ax_pred.arrow(
                 x_start, y_start,
                 arrow_length * np.cos(theta_start), arrow_length * np.sin(theta_start),
-                color=cmap(a % cmap.N), head_width=0.5, head_length=1.0, alpha=0.9, length_includes_head=True
+                color=color, head_width=0.5, head_length=1.0, alpha=0.9, length_includes_head=True
             )
 
     # Plot ground truth trajectories (right subplot)
@@ -150,7 +228,18 @@ def plot_trajectories(map_polylines, polyline_masks, pred_traj, gt_traj, noisy_t
             x = gt_traj[a, valid_mask_a, 0]
             y = gt_traj[a, valid_mask_a, 1]
             theta = gt_traj[a, valid_mask_a, 2]
-            ax_gt.plot(x, y, "o", color=cmap(a % cmap.N), linewidth=1.5, alpha=0.9) # Use modulo
+            
+            # Use black color for ego agent, colored for others
+            if a == ego_agent_idx:
+                color = 'black'
+                linewidth = 3.0  # Thicker line for ego agent
+                alpha = 1.0
+            else:
+                color = cmap(a % cmap.N)
+                linewidth = 1.5
+                alpha = 0.9
+            
+            ax_gt.plot(x, y, "o", color=color, linewidth=linewidth, alpha=alpha)
 
             # Add arrow at the start of the valid ground truth
             x_start, y_start, theta_start = x[0], y[0], theta[0]
@@ -158,7 +247,7 @@ def plot_trajectories(map_polylines, polyline_masks, pred_traj, gt_traj, noisy_t
             ax_gt.arrow(
                 x_start, y_start,
                 arrow_length * np.cos(theta_start), arrow_length * np.sin(theta_start),
-                color=cmap(a % cmap.N), head_width=0.5, head_length=1.0, alpha=0.9, length_includes_head=True
+                color=color, head_width=0.5, head_length=1.0, alpha=0.9, length_includes_head=True
             )
 
     ax_pred.set_title('Predicted Trajectories')
@@ -182,9 +271,14 @@ def plot_trajectories(map_polylines, polyline_masks, pred_traj, gt_traj, noisy_t
         return None
     else:
         return fig # Return figure object for TensorBoard etc.
+
+
 from typing import Optional # Diesen Import ggf. ganz oben in utils.py hinzufügen
 
 # ... [plot_trajectories und sample_noise bleiben unverändert] ...
+
+
+
 
 def embed_features(
     inputs: torch.Tensor, 
